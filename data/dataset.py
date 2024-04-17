@@ -8,7 +8,7 @@ def get_data(data_path, mode):
     dataset = []
     for class_folder in os.listdir(data_path):
         for image_path in os.listdir(os.path.join(data_path,class_folder)):
-            dataset.append({'image': os.path.join(data_path,class_folder,image_path), 'label': int(class_folder)})
+            dataset.append({'image_path': os.path.join(data_path,class_folder,image_path), 'image': os.path.join(data_path,class_folder,image_path), 'label': int(class_folder)})
     return dataset
 
 def get_loader(data_path, transforms = None, mode = 'training', shuffle = False, batch_size = 1):

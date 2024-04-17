@@ -2,6 +2,13 @@
     "data":{
         "path":"data/KneeOsteoarthritisDataset",
         "shuffle": true,
-        "batch_size":2
+        "batch_size":1
+    },
+    "transforms":{
+        "template_path": "val/0/9024900R.png",
+        "cliplimit":4,
+        "tilegridsize":[8,8],
+        "t1": 50,
+        "t2": 220
     }
 }
