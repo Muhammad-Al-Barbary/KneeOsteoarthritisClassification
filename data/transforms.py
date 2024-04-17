@@ -76,15 +76,16 @@ class Canny(MapTransform):
         return d
     
     
-train_transforms = Compose([
+train_transforms = Compose([ # used for training set only, can include data augmentation transforms
     LoadImaged(keys='image'),
     EnsureChannelFirstd(keys='image'),
     Rotate90d(keys='image', k=3),
     ToNumpyd(keys='image', dtype=np.uint8),
     HistogramMatchd(keys='image', template_path=os.path.join(config.data['path'],config.transforms['template_path'])),
-    CLAHEd(keys='image', cliplimit=config.transforms['cliplimit'], tilegridsize=config.transforms['tilegridsize'])
+    CLAHEd(keys='image', cliplimit=config.transforms['cliplimit'], tilegridsize=config.transforms['tilegridsize']),
+    Canny(keys='image', t1=config.transforms['t1'], t2=config.transforms['t2'])
 ])
-test_transforms = Compose([
+test_transforms = Compose([ # used for validation and testing sets
     LoadImaged(keys='image'),
     EnsureChannelFirstd(keys='image'),
     Rotate90d(keys='image', k=3),
