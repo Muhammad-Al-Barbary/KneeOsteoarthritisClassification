@@ -1,0 +1,7 @@
+{
+    "data":{
+        "path":"data/KneeOsteoarthritisDataset",
+        "shuffle": true,
+        "batch_size":2
+    }
+}
