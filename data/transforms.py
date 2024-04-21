@@ -3,6 +3,7 @@ from configs import config
 import os 
 import numpy as np
 import cv2
+from sklearn.cluster import KMeans
 from monai.transforms import (
     Compose,
     LoadImaged,
@@ -11,7 +12,10 @@ from monai.transforms import (
     MapTransform,
     SqueezeDimd,
     ToNumpyd,
-    ToTensord
+    ToTensord,
+    FillHolesd,
+    KeepLargestConnectedComponentd,
+    GaussianSmoothd
     )
 
 class HistogramMatchd(MapTransform):
@@ -57,7 +61,24 @@ class CLAHEd(MapTransform):
         return d   
     
     
-class Canny(MapTransform):
+class HistogramEqualizationd(MapTransform):
+    def __init__(self, keys, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        
+    def equalize_hist(self, input):
+        input = input[0]  # Assuming single channel image
+        input_equalized = cv2.equalizeHist(input)
+        input_equalized = np.expand_dims(input_equalized, 0)
+        return input_equalized
+    
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            d[key] = self.equalize_hist(d[key])
+        return d
+
+    
+class Cannyd(MapTransform):
     def __init__(self, keys, t1=100, t2=200, allow_missing_keys=False):
         super().__init__(keys, allow_missing_keys)
         self.threshold1 = t1
@@ -74,23 +95,207 @@ class Canny(MapTransform):
         for key in self.key_iterator(d):
             d[key] = self.canny_edge_detection(d[key])
         return d
+
+
+class Sobeld(MapTransform):
+    def __init__(self, keys, dx=1, dy=1, ksize=3, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.dx = dx
+        self.dy = dy
+        self.ksize = ksize
+        
+    def sobel_edge_detection(self, input):
+        input = input[0]
+        edges_x = cv2.Sobel(input, cv2.CV_64F, self.dx, 0, ksize=self.ksize)
+        edges_y = cv2.Sobel(input, cv2.CV_64F, 0, self.dy, ksize=self.ksize)
+        edges = np.sqrt(edges_y ** 2)# + edges_x ** 2)
+        edges = np.uint8(edges)
+        edges = np.expand_dims(edges, 0)
+        return edges
+    
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            d[key] = self.sobel_edge_detection(d[key])
+        return d
+    
+class Otsud(MapTransform):
+    def __init__(self, keys, output_key = None, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.output_key = output_key
+        
+    def otsu_thresholding(self, input):
+        input = input[0]  # Assuming input is a single channel image
+        _, thresh = cv2.threshold(input, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thresh = np.expand_dims(thresh, 0)
+        return thresh
+    
+    def __call__(self, data):
+        for key in self.key_iterator(data):
+            if self.output_key is None:
+                self.output_key = key
+            data[self.output_key] = self.otsu_thresholding(data[key])
+        return data
+
+
+class IterativeWatershedd(MapTransform):
+    def __init__(self, keys, positive_key, negative_key, iterations = 1, output_key = None, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.output_key = output_key
+        self.positive_key = positive_key
+        self.negative_key = negative_key
+        self.iterations = iterations
+        
+    def watershed(self, image, pos_marker, neg_marker, iterations):
+        im = image[0].astype(np.uint8)
+        markers = pos_marker[0].astype(int) + neg_marker[0].astype(int)
+        labels = cv2.watershed(np.stack([im,im,im],-1), markers)
+        for _ in range(3): 
+            markers=np.zeros_like(markers)
+            markers[labels==3]=3
+            markers[labels==2]=2
+            markers[neg_marker[0]==1]=1
+            labels =cv2.watershed(np.stack([im,im,im],-1), markers)
+        labels[labels==1]=0
+        labels[labels==-1]=0
+        return np.expand_dims(labels,0)
+    
+    def __call__(self, data):
+        for key in self.key_iterator(data):
+            if self.output_key is None:
+                self.output_key = key
+            data[self.output_key] = self.watershed(data[key], data[self.positive_key], data[self.negative_key], self.iterations)
+        return data
     
     
+class MorphologicalErosiond(MapTransform):
+    def __init__(self, keys, kernel_size=(3, 3), iterations=1, output_key = None, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.kernel_size = kernel_size
+        self.iterations = iterations
+        self.output_key = output_key
+        
+    def perform_erosion(self, input):
+        input = input[0]
+        kernel = np.ones(self.kernel_size, np.uint8)
+        erosion = cv2.erode(input, kernel, iterations=self.iterations)
+        erosion = np.expand_dims(erosion, 0)
+        return erosion
+    
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            if self.output_key is None:
+                self.output_key = key
+            d[self.output_key] = self.perform_erosion(d[key])
+        return d
+
+class MorphologicalDilationd(MapTransform):
+    def __init__(self, keys, kernel_size=(3, 3), iterations=1, output_key = None, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.kernel_size = kernel_size
+        self.iterations = iterations
+        self.output_key = output_key
+        
+    def perform_dilation(self, input):
+        input = input[0]
+        kernel = np.ones(self.kernel_size, np.uint8)
+        dilation = cv2.dilate(input, kernel, iterations=self.iterations)
+        dilation = np.expand_dims(dilation, 0)
+        return dilation
+    
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            if self.output_key is None:
+                self.output_key = key
+            d[self.output_key] = self.perform_dilation(d[key])
+        return d
+    
+
+class PositiveExtractiond(MapTransform):
+    def __init__(self, keys, num_clusters=2, output_key=None, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.num_clusters = num_clusters
+        self.output_key = output_key
+        
+    def positive(self, input):
+        image = input[0]
+        positive_points = np.transpose(np.where(image == 255))
+        kmeans = KMeans(n_clusters=self.num_clusters)
+        kmeans.fit(positive_points)
+        centroids = kmeans.cluster_centers_.astype(int)  # Assuming you want to exclude the first dimension
+        positive_marker = np.zeros_like(image)
+        positive_marker[centroids[0,0], centroids[0,1]] = 2
+        positive_marker[centroids[1,0], centroids[1,1]] = 3
+        positive_marker = np.expand_dims(positive_marker, 0)
+        return positive_marker
+    
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            if self.output_key is None:
+                self.output_key = key
+            d[self.output_key] = self.positive(d[key])
+        return d
+    
+    
+class NegativeExtractiond(MapTransform):
+    def __init__(self, keys, num_clusters=2, output_key=None, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.num_clusters = num_clusters
+        self.output_key = output_key
+        
+    def negative(self, input):
+        return (255-input)/255
+    
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            if self.output_key is None:
+                self.output_key = key
+            d[self.output_key] = self.negative(d[key])
+        return d
+    
+
+
+
 train_transforms = Compose([ # used for training set only, can include data augmentation transforms
+    # BASIC TRANSFORMATIONS
     LoadImaged(keys='image'),
     EnsureChannelFirstd(keys='image'),
     Rotate90d(keys='image', k=3),
     ToNumpyd(keys='image', dtype=np.uint8),
+
+    # PREPROCESSING
     HistogramMatchd(keys='image', template_path=os.path.join(config.data['path'],config.transforms['template_path'])),
     CLAHEd(keys='image', cliplimit=config.transforms['cliplimit'], tilegridsize=config.transforms['tilegridsize']),
-    Canny(keys='image', t1=config.transforms['t1'], t2=config.transforms['t2'])
+   
+    # SEGMENTATION
+    Otsud(keys='image', output_key='image_thresholded'),
+    MorphologicalDilationd(keys='image_thresholded', output_key = 'image_thresholded_dilated', iterations = 3),
+    NegativeExtractiond(keys='image_thresholded_dilated', output_key = 'negative_marker'),
+    PositiveExtractiond(keys='image_thresholded', output_key = 'positive_marker'),
+    MorphologicalDilationd(keys='positive_marker', iterations=15),
+    IterativeWatershedd(keys='image', positive_key='positive_marker', negative_key='negative_marker', iterations=3, output_key='segmented_image')
 ])
+
 test_transforms = Compose([ # used for validation and testing sets
+    # BASIC TRANSFORMATIONS
     LoadImaged(keys='image'),
     EnsureChannelFirstd(keys='image'),
     Rotate90d(keys='image', k=3),
     ToNumpyd(keys='image', dtype=np.uint8),
+
+    # PREPROCESSING
     HistogramMatchd(keys='image', template_path=os.path.join(config.data['path'],config.transforms['template_path'])),
     CLAHEd(keys='image', cliplimit=config.transforms['cliplimit'], tilegridsize=config.transforms['tilegridsize']),
-    Canny(keys='image', t1=config.transforms['t1'], t2=config.transforms['t2'])
+   
+    # SEGMENTATION
+    Otsud(keys='image', output_key='image_thresholded'),
+    MorphologicalDilationd(keys='image_thresholded', output_key = 'image_thresholded_dilated', iterations = 3),
+    NegativeExtractiond(keys='image_thresholded_dilated', output_key = 'negative_marker'),
+    PositiveExtractiond(keys='image_thresholded', output_key = 'positive_marker'),
+    MorphologicalDilationd(keys='positive_marker', iterations=15),
+    IterativeWatershedd(keys='image', positive_key='positive_marker', negative_key='negative_marker', iterations=3, output_key='segmented_image')
 ])

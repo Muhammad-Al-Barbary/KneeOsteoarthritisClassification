@@ -5,10 +5,10 @@
         "batch_size":1
     },
     "transforms":{
-        "template_path": "val/0/9024900R.png",
+        "template_path": "val/0/9081799R.png",
         "cliplimit":4,
         "tilegridsize":[8,8],
-        "t1": 50,
-        "t2": 220
+        "t1": 90,
+        "t2": 150
     }
 }
