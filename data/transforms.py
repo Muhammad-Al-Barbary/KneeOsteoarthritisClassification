@@ -15,7 +15,9 @@ from monai.transforms import (
     ToTensord,
     FillHolesd,
     KeepLargestConnectedComponentd,
-    GaussianSmoothd
+    MedianSmoothd,
+    GaussianSharpend,
+    ScaleIntensityRanged,
     )
 
 class HistogramMatchd(MapTransform):
@@ -42,15 +44,19 @@ class HistogramMatchd(MapTransform):
     
     
 class CLAHEd(MapTransform):
-    def __init__(self, keys, cliplimit=4.0, tilegridsize=(8,8), allow_missing_keys=False):
+    def __init__(self, keys, cliplimit=4.0, tilegridsize=(8,8), a_min = 0, a_max=255,  allow_missing_keys=False):
         super().__init__(keys, allow_missing_keys)
         self.cliplimit = cliplimit
+        self.a_min=a_min
+        self.a_max=a_max
         self.tilegridsize=tilegridsize
         
     def clahe(self, input):
         input = input[0]
+        input[input<=self.a_min]=self.a_min
+        input[input>=self.a_max]=self.a_max
         clahe = cv2.createCLAHE(clipLimit=self.cliplimit,tileGridSize=self.tilegridsize)
-        input = clahe.apply(input,0)   
+        input = clahe.apply(input,0)  
         input = np.expand_dims(input,0)
         return input
     
@@ -62,12 +68,13 @@ class CLAHEd(MapTransform):
     
     
 class HistogramEqualizationd(MapTransform):
-    def __init__(self, keys, allow_missing_keys=False):
+    def __init__(self, keys, a_min = 0, allow_missing_keys=False):
         super().__init__(keys, allow_missing_keys)
-        
+        self.a_min = a_min
     def equalize_hist(self, input):
         input = input[0]  # Assuming single channel image
         input_equalized = cv2.equalizeHist(input)
+        input_equalized[input_equalized<self.a_min]=self.a_min
         input_equalized = np.expand_dims(input_equalized, 0)
         return input_equalized
     
@@ -158,7 +165,8 @@ class IterativeWatershedd(MapTransform):
             labels =cv2.watershed(np.stack([im,im,im],-1), markers)
         labels[labels==1]=0
         labels[labels==-1]=0
-        return np.expand_dims(labels,0)
+        labels = np.expand_dims(labels.astype(np.uint8),0)
+        return labels
     
     def __call__(self, data):
         for key in self.key_iterator(data):
@@ -258,6 +266,77 @@ class NegativeExtractiond(MapTransform):
         return d
     
 
+class MeanShiftd(MapTransform):
+    def __init__(self, keys, sr=10, cr=10, output_key = None, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.sr = sr
+        self.cr = cr
+        self.output_key = output_key
+        
+    def mean_shift(self, input):
+        input = input[0]
+        image_color = cv2.cvtColor(input.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        mean_shift = cv2.pyrMeanShiftFiltering(image_color, self.sr, self.cr)[:,:,0]
+        mean_shift = np.expand_dims(mean_shift, 0)
+        return mean_shift
+    
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            if self.output_key is None:
+                self.output_key = key
+            d[self.output_key] = self.mean_shift(d[key])
+        return d
+    
+
+
+class KMeansSegmentd(MapTransform):
+    def __init__(self, keys, num_clusters=2, output_key = None, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.num_clusters = num_clusters
+        self.output_key = output_key
+        
+    def segment(self, input):
+        input = input[0]
+        reshaped_data = input.reshape(-1, 1)
+        kmeans = KMeans(n_clusters=self.num_clusters)
+        kmeans.fit(reshaped_data)
+        labels = kmeans.predict(reshaped_data)
+        larger_class_label = np.argmax(np.bincount(labels))
+        labels = np.where(labels == larger_class_label, 1, 0)
+        segmented_image = labels.reshape(input.shape)
+        segmented_image = np.expand_dims(segmented_image, 0).astype(np.uint8)
+        return segmented_image
+    
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            if self.output_key is None:
+                self.output_key = key
+            d[self.output_key] = self.segment(d[key])
+        return d
+    
+    
+class DistanceTransformd(MapTransform):
+    def __init__(self, keys, output_key=None, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.output_key = output_key
+        
+    def distance_transform(self, input):
+        input = input[0]
+        dt = cv2.distanceTransform(input, distanceType=cv2.DIST_L2, maskSize=5)
+        dt = 255*(dt-dt.min())/(dt.max()-dt.min())
+        dt = np.expand_dims(dt, 0).astype(np.uint8)
+        return dt
+    
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            if self.output_key is None:
+                self.output_key = key
+            d[self.output_key] = self.distance_transform(d[key])
+        return d
+
 
 
 train_transforms = Compose([ # used for training set only, can include data augmentation transforms
@@ -266,18 +345,16 @@ train_transforms = Compose([ # used for training set only, can include data augm
     EnsureChannelFirstd(keys='image'),
     Rotate90d(keys='image', k=3),
     ToNumpyd(keys='image', dtype=np.uint8),
-
     # PREPROCESSING
     HistogramMatchd(keys='image', template_path=os.path.join(config.data['path'],config.transforms['template_path'])),
-    CLAHEd(keys='image', cliplimit=config.transforms['cliplimit'], tilegridsize=config.transforms['tilegridsize']),
-   
-    # SEGMENTATION
-    Otsud(keys='image', output_key='image_thresholded'),
-    MorphologicalDilationd(keys='image_thresholded', output_key = 'image_thresholded_dilated', iterations = 3),
-    NegativeExtractiond(keys='image_thresholded_dilated', output_key = 'negative_marker'),
+    CLAHEd(keys='image', cliplimit=config.transforms['cliplimit'], tilegridsize=config.transforms['tilegridsize'], a_min=120, a_max=190),
+    # Segmentation
+    MeanShiftd(keys='image', sr = 50, cr = 50, output_key= 'mean_shift'),
+    Otsud(keys='mean_shift', output_key='image_thresholded'),
     PositiveExtractiond(keys='image_thresholded', output_key = 'positive_marker'),
-    MorphologicalDilationd(keys='positive_marker', iterations=15),
-    IterativeWatershedd(keys='image', positive_key='positive_marker', negative_key='negative_marker', iterations=3, output_key='segmented_image')
+    MorphologicalDilationd(keys='positive_marker', kernel_size=(26, 91)), 
+    NegativeExtractiond(keys='image_thresholded', output_key = 'negative_marker'),
+    IterativeWatershedd(keys='image', positive_key='positive_marker', negative_key='negative_marker', iterations=1, output_key='image_segmented'),
 ])
 
 test_transforms = Compose([ # used for validation and testing sets
@@ -286,16 +363,14 @@ test_transforms = Compose([ # used for validation and testing sets
     EnsureChannelFirstd(keys='image'),
     Rotate90d(keys='image', k=3),
     ToNumpyd(keys='image', dtype=np.uint8),
-
     # PREPROCESSING
     HistogramMatchd(keys='image', template_path=os.path.join(config.data['path'],config.transforms['template_path'])),
-    CLAHEd(keys='image', cliplimit=config.transforms['cliplimit'], tilegridsize=config.transforms['tilegridsize']),
-   
-    # SEGMENTATION
-    Otsud(keys='image', output_key='image_thresholded'),
-    MorphologicalDilationd(keys='image_thresholded', output_key = 'image_thresholded_dilated', iterations = 3),
-    NegativeExtractiond(keys='image_thresholded_dilated', output_key = 'negative_marker'),
+    CLAHEd(keys='image', cliplimit=config.transforms['cliplimit'], tilegridsize=config.transforms['tilegridsize'], a_min=120, a_max=190),
+    # Segmentation
+    MeanShiftd(keys='image', sr = 50, cr = 50, output_key= 'mean_shift'),
+    Otsud(keys='mean_shift', output_key='image_thresholded'),
     PositiveExtractiond(keys='image_thresholded', output_key = 'positive_marker'),
-    MorphologicalDilationd(keys='positive_marker', iterations=15),
-    IterativeWatershedd(keys='image', positive_key='positive_marker', negative_key='negative_marker', iterations=3, output_key='segmented_image')
+    MorphologicalDilationd(keys='positive_marker', kernel_size=(26, 91)), 
+    NegativeExtractiond(keys='image_thresholded', output_key = 'negative_marker'),
+    IterativeWatershedd(keys='image', positive_key='positive_marker', negative_key='negative_marker', iterations=1, output_key='image_segmented'),
 ])
