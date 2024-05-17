@@ -29,12 +29,25 @@ class HistogramMatchd(MapTransform):
         
     def match_histogram(self, input, template):
         input = input[0]
+        # input_hist, _ = np.histogram(input.flatten(), bins=256, range=[0,255], density=True)
+        # template_hist, _ = np.histogram(template.flatten(), bins=256, range=[0,255], density=True)
+        # input_cdf = input_hist.cumsum()
+        # template_cdf = template_hist.cumsum()
+        # lut = np.interp(input_cdf, template_cdf, range(256))
+        # matched_img = cv2.LUT(input.astype(np.uint8), lut.astype(np.uint8))
         input_hist, _ = np.histogram(input.flatten(), bins=256, range=[0,255], density=True)
         template_hist, _ = np.histogram(template.flatten(), bins=256, range=[0,255], density=True)
+
+        # Compute cumulative distribution functions (CDFs)
         input_cdf = input_hist.cumsum()
         template_cdf = template_hist.cumsum()
+
+        # Map input image intensities to match template histogram
         lut = np.interp(input_cdf, template_cdf, range(256))
+
+        # Apply histogram matching
         matched_img = cv2.LUT(input.astype(np.uint8), lut.astype(np.uint8))
+                          
         matched_img = np.expand_dims(matched_img,0)
         return matched_img
     
@@ -305,29 +318,48 @@ class MeanShiftd(MapTransform):
 
 
 class KMeansSegmentd(MapTransform):
-    def __init__(self, keys, num_clusters=2, output_key = None, allow_missing_keys=False):
+    def __init__(self, keys, num_clusters=2, output_key = None, mask_key=None, allow_missing_keys=False):
         super().__init__(keys, allow_missing_keys)
         self.num_clusters = num_clusters
         self.output_key = output_key
+        self.mask_key = mask_key
         
-    def segment(self, input):
-        input = input[0]
-        reshaped_data = input.reshape(-1, 1)
-        kmeans = KMeans(n_clusters=self.num_clusters)
-        kmeans.fit(reshaped_data)
-        labels = kmeans.predict(reshaped_data)
-        larger_class_label = np.argmax(np.bincount(labels))
-        labels = np.where(labels == larger_class_label, 1, 0)
-        segmented_image = labels.reshape(input.shape)
-        segmented_image = np.expand_dims(segmented_image, 0).astype(np.uint8)
-        return segmented_image
+    # def segment(self, input, mask=None):
+    #     input = input[0]
+    #     reshaped_data = input.reshape(-1, 1)
+    #     kmeans = KMeans(n_clusters=self.num_clusters)
+    #     kmeans.fit(reshaped_data)
+    #     labels = kmeans.predict(reshaped_data)
+    #     segmented_image = labels.reshape(input.shape)
+    #     plt.imshow(segmented_image)
+    #     plt.show()
+    #     mask = mask>0
+    #     unique = np.unique(segmented_image*mask, return_counts=True)
+    #     common_class = unique[0][np.argmax(unique[1])]
+    #     segmented_image = segmented_image==common_class
+    #     segmented_image = np.expand_dims(segmented_image, 0).astype(np.uint8)
+    #     return segmented_image
     
+    def segment(self, input, mask=None):
+        input = input[0]
+        pixels = input.flatten()
+        pixels = np.float32(pixels)
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
+        _, labels, centers = cv2.kmeans(pixels, self.num_clusters, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+        centers = np.uint8(centers)
+        segmented_image = centers[labels.flatten()]
+        segmented_image = segmented_image.reshape(input.shape)
+        # plt.imshow(segmented_image==segmented_image.max(), cmap='gray')
+        # plt.show()
+        segmented_image = np.expand_dims(segmented_image==segmented_image.max(), 0).astype(np.uint8)
+        return segmented_image
+
     def __call__(self, data):
         d = dict(data)
         for key in self.key_iterator(d):
             if self.output_key is None:
                 self.output_key = key
-            d[self.output_key] = self.segment(d[key])
+            d[self.output_key] = self.segment(d[key], mask=d[self.mask_key])
         return d
     
     
@@ -381,6 +413,44 @@ class EnsureNotInvertedd(MapTransform):
         return d
 
 
+class Merged(MapTransform):
+    def __init__(self, keys, merging_key, output_key=None, img_size=224, margin=25, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.output_key = output_key
+        self.merging_key = merging_key
+        self.img_size = img_size
+        self.margin = margin
+
+    def find_indices(self, arr, target):
+        min_index = None
+        max_index = None
+        for i in range(len(arr)):
+            if (arr[i] == target).any():
+                if min_index is None:
+                    min_index = i
+                max_index = i
+        return min_index, max_index
+
+
+    def merge(self, img, ref, img_size, margin):
+        img = img[0].copy()
+        ref = ref[0]
+        unique_values_per_row = [np.unique(row) for row in img]
+        min2, max2 = self.find_indices(unique_values_per_row, 2)
+        min3, max3 = self.find_indices(unique_values_per_row, 3)   
+        line = ((min2+max2+min3+max3)-img_size)/2    
+        img[int(line-margin):int(line+margin)] = img[int(line-margin):int(line+margin)] * ref[int(line-margin):int(line+margin)]
+        img = np.expand_dims(img, 0)
+        return img
+    
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            if self.output_key is None:
+                self.output_key = key
+            d[self.output_key] = self.merge(d[key], d[self.merging_key], img_size=self.img_size, margin=self.margin)
+        return d
+    
 
 train_transforms = Compose([ # used for training set only, can include data augmentation transforms
     # BASIC TRANSFORMATIONS
@@ -392,13 +462,18 @@ train_transforms = Compose([ # used for training set only, can include data augm
     EnsureNotInvertedd(keys='image', output_key='not_inverted', pos_refs=[os.path.join(config.data['path'],pos_ref) for pos_ref in config.transforms['pos_refs']], neg_refs=[os.path.join(config.data['path'],neg_ref) for neg_ref in config.transforms['neg_refs']]),
     HistogramMatchd(keys='not_inverted', output_key='matched', template_path=os.path.join(config.data['path'],config.transforms['template_path'])),
     CLAHEd(keys='matched', output_key='clahe', cliplimit=config.transforms['cliplimit'], tilegridsize=config.transforms['tilegridsize'], a_min=120, a_max=190),
+    CLAHEd(keys='matched', output_key='clahe_kmeans', cliplimit=6, tilegridsize=config.transforms['tilegridsize'], a_min=120, a_max=190),
+
     # Segmentation
     MeanShiftd(keys='clahe', output_key='mean_shift', sr = 50, cr = 50),
     Otsud(keys='mean_shift', output_key='image_thresholded'),
     PositiveExtractiond(keys='image_thresholded', output_key = 'positive_marker'),
     MorphologicalDilationd(keys='positive_marker', kernel_size=(26, 91)), 
     NegativeExtractiond(keys='image_thresholded', output_key = 'negative_marker'),
-    IterativeWatershedd(keys='clahe', iterations=3, positive_key='positive_marker', negative_key='negative_marker', output_key='image_segmented'),
+    IterativeWatershedd(keys='clahe', iterations=5, positive_key='positive_marker', negative_key='negative_marker', output_key='watershed'),  
+    KMeansSegmentd(keys='clahe_kmeans', num_clusters=2, output_key='kmeans', mask_key='watershed'),
+    Merged(keys='watershed', merging_key='kmeans', output_key='merged', margin=25),
+    FillHolesd(keys='merged', connectivity=100)
 ])
 
 test_transforms = Compose([ # used for validation and testing sets
@@ -411,11 +486,16 @@ test_transforms = Compose([ # used for validation and testing sets
     EnsureNotInvertedd(keys='image', output_key='not_inverted', pos_refs=[os.path.join(config.data['path'],pos_ref) for pos_ref in config.transforms['pos_refs']], neg_refs=[os.path.join(config.data['path'],neg_ref) for neg_ref in config.transforms['neg_refs']]),
     HistogramMatchd(keys='not_inverted', output_key='matched', template_path=os.path.join(config.data['path'],config.transforms['template_path'])),
     CLAHEd(keys='matched', output_key='clahe', cliplimit=config.transforms['cliplimit'], tilegridsize=config.transforms['tilegridsize'], a_min=120, a_max=190),
+    CLAHEd(keys='matched', output_key='clahe_kmeans', cliplimit=6, tilegridsize=config.transforms['tilegridsize'], a_min=120, a_max=190),
+
     # Segmentation
     MeanShiftd(keys='clahe', output_key='mean_shift', sr = 50, cr = 50),
     Otsud(keys='mean_shift', output_key='image_thresholded'),
     PositiveExtractiond(keys='image_thresholded', output_key = 'positive_marker'),
     MorphologicalDilationd(keys='positive_marker', kernel_size=(26, 91)), 
     NegativeExtractiond(keys='image_thresholded', output_key = 'negative_marker'),
-    IterativeWatershedd(keys='clahe', iterations=3, positive_key='positive_marker', negative_key='negative_marker', output_key='image_segmented'),
+    IterativeWatershedd(keys='clahe', iterations=5, positive_key='positive_marker', negative_key='negative_marker', output_key='watershed'),  
+    KMeansSegmentd(keys='clahe_kmeans', num_clusters=2, output_key='kmeans', mask_key='watershed'),
+    Merged(keys='watershed', merging_key='kmeans', output_key='merged', margin=25),
+    FillHolesd(keys='merged', connectivity=100)
 ])
