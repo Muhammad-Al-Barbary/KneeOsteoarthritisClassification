@@ -29,25 +29,12 @@ class HistogramMatchd(MapTransform):
         
     def match_histogram(self, input, template):
         input = input[0]
-        # input_hist, _ = np.histogram(input.flatten(), bins=256, range=[0,255], density=True)
-        # template_hist, _ = np.histogram(template.flatten(), bins=256, range=[0,255], density=True)
-        # input_cdf = input_hist.cumsum()
-        # template_cdf = template_hist.cumsum()
-        # lut = np.interp(input_cdf, template_cdf, range(256))
-        # matched_img = cv2.LUT(input.astype(np.uint8), lut.astype(np.uint8))
         input_hist, _ = np.histogram(input.flatten(), bins=256, range=[0,255], density=True)
         template_hist, _ = np.histogram(template.flatten(), bins=256, range=[0,255], density=True)
-
-        # Compute cumulative distribution functions (CDFs)
         input_cdf = input_hist.cumsum()
         template_cdf = template_hist.cumsum()
-
-        # Map input image intensities to match template histogram
         lut = np.interp(input_cdf, template_cdf, range(256))
-
-        # Apply histogram matching
-        matched_img = cv2.LUT(input.astype(np.uint8), lut.astype(np.uint8))
-                          
+        matched_img = cv2.LUT(input.astype(np.uint8), lut.astype(np.uint8))          
         matched_img = np.expand_dims(matched_img,0)
         return matched_img
     
@@ -58,10 +45,7 @@ class HistogramMatchd(MapTransform):
             data[self.output_key] = self.match_histogram(data[key], self.template)
         return data
     
-    
 
-    
-    
 class CLAHEd(MapTransform):
     def __init__(self, keys, cliplimit=4.0, tilegridsize=(8,8), a_min = 0, a_max=255,  output_key=None, allow_missing_keys=False):
         super().__init__(keys, allow_missing_keys)
@@ -91,6 +75,7 @@ class HistogramEqualizationd(MapTransform):
     def __init__(self, keys, a_min = 0, allow_missing_keys=False):
         super().__init__(keys, allow_missing_keys)
         self.a_min = a_min
+        
     def equalize_hist(self, input):
         input = input[0]  # Assuming single channel image
         input_equalized = cv2.equalizeHist(input)
@@ -135,7 +120,7 @@ class Sobeld(MapTransform):
         input = input[0]
         edges_x = cv2.Sobel(input, cv2.CV_64F, self.dx, 0, ksize=self.ksize)
         edges_y = cv2.Sobel(input, cv2.CV_64F, 0, self.dy, ksize=self.ksize)
-        edges = np.sqrt(edges_y ** 2)# + edges_x ** 2)
+        edges = np.sqrt(edges_y ** 2 + edges_x ** 2)
         edges = np.uint8(edges)
         edges = np.expand_dims(edges, 0)
         return edges
@@ -152,7 +137,7 @@ class Otsud(MapTransform):
         self.output_key = output_key
         
     def otsu_thresholding(self, input):
-        input = input[0]  # Assuming input is a single channel image
+        input = input[0]
         _, thresh = cv2.threshold(input, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         thresh = np.expand_dims(thresh, 0)
         return thresh
@@ -177,19 +162,12 @@ class IterativeWatershedd(MapTransform):
         im = image[0].astype(np.uint8)
         markers = pos_marker[0].astype(int) + neg_marker[0].astype(int)
         labels = cv2.watershed(np.stack([im,im,im],-1), markers)
-        # plt.subplot(1,iterations+1,1)
-        # plt.imshow(labels)
-        # plt.axis('off')
-        for i in range(iterations):
+        for _ in range(iterations):
             markers=np.zeros_like(markers)
             markers[labels==3]=3
             markers[labels==2]=2
             markers[neg_marker[0]==1]=1
             labels=cv2.watershed(np.stack([im,im,im],-1), markers)
-        #     plt.subplot(1,iterations+1,2+i)
-        #     plt.imshow(labels)
-        #     plt.axis('off')
-        # plt.show()
         labels[labels==1]=0
         labels[labels==-1]=0
         labels = np.expand_dims(labels.astype(np.uint8),0)
@@ -225,6 +203,7 @@ class MorphologicalErosiond(MapTransform):
             d[self.output_key] = self.perform_erosion(d[key])
         return d
 
+
 class MorphologicalDilationd(MapTransform):
     def __init__(self, keys, kernel_size=(3, 3), iterations=1, output_key = None, allow_missing_keys=False):
         super().__init__(keys, allow_missing_keys)
@@ -259,7 +238,7 @@ class PositiveExtractiond(MapTransform):
         positive_points = np.transpose(np.where(image == 255))
         kmeans = KMeans(n_clusters=self.num_clusters)
         kmeans.fit(positive_points)
-        centroids = kmeans.cluster_centers_.astype(int)  # Assuming you want to exclude the first dimension
+        centroids = kmeans.cluster_centers_.astype(int)
         positive_marker = np.zeros_like(image)
         positive_marker[centroids[0,0], centroids[0,1]] = 2
         positive_marker[centroids[1,0], centroids[1,1]] = 3
@@ -323,22 +302,6 @@ class KMeansSegmentd(MapTransform):
         self.num_clusters = num_clusters
         self.output_key = output_key
         self.mask_key = mask_key
-        
-    # def segment(self, input, mask=None):
-    #     input = input[0]
-    #     reshaped_data = input.reshape(-1, 1)
-    #     kmeans = KMeans(n_clusters=self.num_clusters)
-    #     kmeans.fit(reshaped_data)
-    #     labels = kmeans.predict(reshaped_data)
-    #     segmented_image = labels.reshape(input.shape)
-    #     plt.imshow(segmented_image)
-    #     plt.show()
-    #     mask = mask>0
-    #     unique = np.unique(segmented_image*mask, return_counts=True)
-    #     common_class = unique[0][np.argmax(unique[1])]
-    #     segmented_image = segmented_image==common_class
-    #     segmented_image = np.expand_dims(segmented_image, 0).astype(np.uint8)
-    #     return segmented_image
     
     def segment(self, input, mask=None):
         input = input[0]
@@ -349,8 +312,6 @@ class KMeansSegmentd(MapTransform):
         centers = np.uint8(centers)
         segmented_image = centers[labels.flatten()]
         segmented_image = segmented_image.reshape(input.shape)
-        # plt.imshow(segmented_image==segmented_image.max(), cmap='gray')
-        # plt.show()
         segmented_image = np.expand_dims(segmented_image==segmented_image.max(), 0).astype(np.uint8)
         return segmented_image
 
@@ -452,31 +413,7 @@ class Merged(MapTransform):
         return d
     
 
-train_transforms = Compose([ # used for training set only, can include data augmentation transforms
-    # BASIC TRANSFORMATIONS
-    LoadImaged(keys='image'),
-    EnsureChannelFirstd(keys='image'),
-    Rotate90d(keys='image', k=3),
-    ToNumpyd(keys='image', dtype=np.uint8),
-    # PREPROCESSING
-    EnsureNotInvertedd(keys='image', output_key='not_inverted', pos_refs=[os.path.join(config.data['path'],pos_ref) for pos_ref in config.transforms['pos_refs']], neg_refs=[os.path.join(config.data['path'],neg_ref) for neg_ref in config.transforms['neg_refs']]),
-    HistogramMatchd(keys='not_inverted', output_key='matched', template_path=os.path.join(config.data['path'],config.transforms['template_path'])),
-    CLAHEd(keys='matched', output_key='clahe', cliplimit=config.transforms['cliplimit'], tilegridsize=config.transforms['tilegridsize'], a_min=120, a_max=190),
-    CLAHEd(keys='matched', output_key='clahe_kmeans', cliplimit=6, tilegridsize=config.transforms['tilegridsize'], a_min=120, a_max=190),
-
-    # Segmentation
-    MeanShiftd(keys='clahe', output_key='mean_shift', sr = 50, cr = 50),
-    Otsud(keys='mean_shift', output_key='image_thresholded'),
-    PositiveExtractiond(keys='image_thresholded', output_key = 'positive_marker'),
-    MorphologicalDilationd(keys='positive_marker', kernel_size=(26, 91)), 
-    NegativeExtractiond(keys='image_thresholded', output_key = 'negative_marker'),
-    IterativeWatershedd(keys='clahe', iterations=5, positive_key='positive_marker', negative_key='negative_marker', output_key='watershed'),  
-    KMeansSegmentd(keys='clahe_kmeans', num_clusters=2, output_key='kmeans', mask_key='watershed'),
-    Merged(keys='watershed', merging_key='kmeans', output_key='merged', margin=25),
-    FillHolesd(keys='merged', connectivity=100)
-])
-
-test_transforms = Compose([ # used for validation and testing sets
+transforms = Compose([ # used for training set only, can include data augmentation transforms
     # BASIC TRANSFORMATIONS
     LoadImaged(keys='image'),
     EnsureChannelFirstd(keys='image'),

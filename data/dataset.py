@@ -1,7 +1,7 @@
 import os 
 from configs import config
 from monai.data import Dataset, DataLoader
-from data.transforms import train_transforms, test_transforms
+from conventional.transforms import conventional_transforms
 import torch
 import random
 import numpy as np
@@ -37,8 +37,3 @@ def get_loader(data_path, transforms = None, mode = 'train', balance=False, shuf
     dataset = Dataset(data, transforms)
     dataloader = DataLoader(dataset, shuffle=shuffle, batch_size=batch_size)
     return dataloader
-
-dataset_path = config.data['path']
-train_loader = get_loader(dataset_path, transforms=train_transforms, mode='train', balance=True, shuffle=config.data['shuffle'], batch_size=config.data['batch_size'], seed=config.seed)
-val_loader = get_loader(dataset_path, transforms=test_transforms, mode='val', shuffle=False, batch_size=config.data['batch_size'])
-test_loader = get_loader(dataset_path, transforms=test_transforms, mode='test', shuffle=False, batch_size=config.data['batch_size'])
